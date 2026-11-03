@@ -4,12 +4,15 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import React from 'react';
 
-// QueryClient singleton
+// QueryClient singleton optimized for speed and resilience
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 1,
+      retry: 0, // Never block UI with endless retries
+      staleTime: 1000 * 60 * 3, // 3 minutes cache for fast screen transitions
+      gcTime: 1000 * 60 * 15,
       refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
     },
   },
 });
