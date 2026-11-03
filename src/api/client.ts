@@ -6,7 +6,6 @@ import { Platform } from 'react-native';
 let cachedToken: string | null = null;
 
 // Determine appropriate default base URL
-// On Android emulator localhost is 10.0.2.2; on physical devices / web localhost or LAN IP is used
 const getBaseUrl = (): string => {
   if (process.env.EXPO_PUBLIC_API_BASE_URL) {
     return process.env.EXPO_PUBLIC_API_BASE_URL;
@@ -14,11 +13,7 @@ const getBaseUrl = (): string => {
   if (typeof process !== 'undefined' && process.env?.REACT_APP_API_BASE_URL) {
     return process.env.REACT_APP_API_BASE_URL;
   }
-  // Android emulator fallback
-  if (Platform.OS === 'android') {
-    return 'http://10.0.2.2:8080/api/v1';
-  }
-  return 'http://localhost:8080/api/v1';
+  return 'https://karcha-backend-project.onrender.com/api/v1';
 };
 
 const api = axios.create({

@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { clearAccessToken, initToken, setAccessToken } from '../api/client';
+import { clearAccessToken, getAccessToken, initToken, setAccessToken } from '../api/client';
 import { splitwiseApi } from '../api/splitwiseService';
 import { UserProfile } from '../types/splitwise';
 
@@ -36,21 +36,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           if (storedUser) {
             setUser(JSON.parse(storedUser));
           }
-          // Fetch fresh user profile in background
-          try {
-            const res = await splitwiseApi.getMyProfile();
-            if (res.data) {
-              setUser(res.data);
-              await AsyncStorage.setItem('userProfile', JSON.stringify(res.data));
-            }
-          } catch {
-            // Ignore offline/network error on bootstrap
-          }
         }
       } catch (e) {
         console.warn('Failed to restore auth token:', e);
       } finally {
+        // Immediately unblock splash screen for instant app launch!
         setIsLoading(false);
+      }
+
+      // Refresh profile in background non-blockingly if not demo
+      try {
+        const activeToken = await getAccessToken();
+        if (activeToken && !activeToken.startsWith('mock_') && !activeToken.startsWith('demo_')) {
+          splitwiseApi.getMyProfile().then((res) => {
+            if (res.data) {
+              setUser(res.data);
+              AsyncStorage.setItem('userProfile', JSON.stringify(res.data)).catch(() => {});
+            }
+          }).catch(() => {});
+        }
+      } catch {
+        // Ignore background sync errors
       }
     };
 

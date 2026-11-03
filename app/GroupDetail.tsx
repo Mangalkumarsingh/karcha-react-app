@@ -87,6 +87,14 @@ export default function GroupDetailScreen() {
     }
   };
 
+  const safeGoBack = () => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)/Home' as any);
+    }
+  };
+
   const handleDeleteGroup = () => {
     Alert.alert(
       'Archive Group',
@@ -100,11 +108,11 @@ export default function GroupDetailScreen() {
             try {
               if (id) {
                 await deleteGroupMutation.mutateAsync(id);
-                router.back();
+                safeGoBack();
               }
             } catch (err: any) {
               Alert.alert('Notice', err.response?.data?.message || 'Group archived.');
-              router.back();
+              safeGoBack();
             }
           },
         },
@@ -128,7 +136,7 @@ export default function GroupDetailScreen() {
           try {
             await removeMemberMutation.mutateAsync(member.userId);
             if (isSelf) {
-              router.back();
+              safeGoBack();
             } else {
               Alert.alert('Success', 'Member removed successfully.');
             }
@@ -182,7 +190,7 @@ export default function GroupDetailScreen() {
       <View style={styles.header}>
         <TouchableOpacity
           style={styles.iconCircle}
-          onPress={() => router.back()}
+          onPress={safeGoBack}
           activeOpacity={0.7}
         >
           <Ionicons name="arrow-back" size={22} color={Color.text} />
