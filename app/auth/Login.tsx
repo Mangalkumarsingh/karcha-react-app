@@ -2,8 +2,10 @@ import { splitwiseApi } from '@/src/api/splitwiseService';
 import { Color } from '@/src/constants/color';
 import { useAuth } from '@/src/context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
+import * as Google from 'expo-auth-session/providers/google';
+import * as WebBrowser from 'expo-web-browser';
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -18,70 +20,128 @@ import {
   View,
 } from 'react-native';
 
+// Complete auth session dismissal for web & deep links
+WebBrowser.maybeCompleteAuthSession();
+
+const GOOGLE_WEB_CLIENT_ID = '928393260134-efn2172cgtu1tc3i7lb58p7p44qng2j6.apps.googleusercontent.com';
+
 export default function LoginScreen() {
-  const [phoneNumber, setPhoneNumber] = useState('');
+  const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
+
   const router = useRouter();
-  const { login } = useAuth();
+  const { requestEmailOtp, loginWithGoogle } = useAuth();
+
+  // Setup Google Sign-In with expo-auth-session
+  const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
+    clientId: GOOGLE_WEB_CLIENT_ID,
+    webClientId: GOOGLE_WEB_CLIENT_ID,
+  });
+
+  // Handle Google OAuth Response
+  useEffect(() => {
+    if (response?.type === 'success') {
+      const idToken = response.params?.id_token;
+      if (idToken) {
+        handleGoogleLoginWithToken(idToken);
+      } else {
+        Alert.alert('Google Sign-In', 'No ID token received from Google. Please try again.');
+      }
+    } else if (response?.type === 'error') {
+      Alert.alert('Google Sign-In Error', response.error?.message || 'Google authentication failed.');
+    }
+  }, [response]);
+
+  const handleGoogleLoginWithToken = async (idToken: string) => {
+    try {
+      setGoogleLoading(true);
+      await loginWithGoogle(idToken);
+      router.replace('/(tabs)/Home');
+    } catch (err: any) {
+      const errorMsg =
+        err.response?.data?.message ||
+        err.message ||
+        'Failed to authenticate with Google.';
+      Alert.alert('Google Sign-In Failed', errorMsg);
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
+  const validateEmailFormat = (text: string) => {
+    const trimmed = text.trim();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(trimmed);
+  };
+
+  const handleEmailChange = (text: string) => {
+    setEmail(text);
+    if (emailError) {
+      setEmailError(null);
+    }
+  };
 
   const handleRequestOtp = async () => {
-    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-    if (cleanNumber.length !== 10) {
-      Alert.alert('Invalid Number', 'Please enter a valid 10-digit mobile number.');
+    const trimmed = email.trim().toLowerCase();
+
+    if (!trimmed) {
+      setEmailError('Email address is required');
       return;
     }
 
-    const fullPhoneNumber = `+91${cleanNumber}`;
+    if (!validateEmailFormat(trimmed)) {
+      setEmailError('Please enter a valid email address');
+      return;
+    }
+
     setLoading(true);
+    setEmailError(null);
 
     try {
-      const response = await splitwiseApi.requestOtp(fullPhoneNumber);
-      if (response.data?.success || response.status === 200) {
+      const res = await requestEmailOtp(trimmed);
+      if (res?.success || res?.message) {
         router.push({
           pathname: '/auth/otp',
-          params: { phone: fullPhoneNumber },
+          params: {
+            email: trimmed,
+            resendAfterSeconds: String(res?.resendAfterSeconds || 60),
+            expiresInSeconds: String(res?.expiresInSeconds || 300),
+          },
         });
       } else {
-        Alert.alert('Notice', response.data?.message || 'OTP could not be sent.');
+        Alert.alert('Notice', res?.message || 'Unable to send OTP. Please try again.');
       }
     } catch (error: any) {
       const errorMessage =
         error.response?.data?.message ||
         error.message ||
-        'Server unreachable. You can continue to OTP for verification or test mode.';
-      
-      // Allow proceeding to OTP screen with notice in development
-      Alert.alert(
-        'OTP Sent Notice',
-        `${errorMessage}\nProceeding to OTP screen for testing.`,
-        [
-          {
-            text: 'Proceed',
-            onPress: () => {
-              router.push({
-                pathname: '/auth/otp',
-                params: { phone: fullPhoneNumber },
-              });
-            },
-          },
-        ]
-      );
+        'Unable to send verification code. Please check your network and try again.';
+      Alert.alert('Verification Error', errorMessage);
     } finally {
       setLoading(false);
     }
   };
 
-  // Demo bypass for quick offline review
-  const handleDemoLogin = async () => {
-    await login('demo_token_' + Date.now(), {
-      id: 'demo_user_1',
-      name: 'Demo User',
-      phoneNumber: '+919876543210',
-      email: 'demo@kharcha.app',
-      createdAt: new Date().toISOString(),
-    });
-    router.replace('/(tabs)/Home');
+  const handleGoogleButtonPress = async () => {
+    if (googleLoading) return;
+    try {
+      setGoogleLoading(true);
+      if (request) {
+        await promptAsync();
+      } else {
+        // Fallback promptAsync call if request isn't initialized yet
+        await promptAsync();
+      }
+    } catch (e: any) {
+      Alert.alert('Google Sign-In', e.message || 'Unable to open Google sign-in window.');
+    } finally {
+      setGoogleLoading(false);
+    }
   };
+
+  const isEmailValid = validateEmailFormat(email);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -93,77 +153,117 @@ export default function LoginScreen() {
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Logo & Header */}
+          {/* Top Section */}
           <View style={styles.header}>
             <View style={styles.logoBadge}>
-              <Ionicons name="wallet" size={44} color={Color.primary} />
+              <Ionicons name="receipt" size={38} color={Color.primary} />
             </View>
-            <Text style={styles.title}>Welcome to Kharcha</Text>
+            <Text style={styles.title}>Welcome to Karcha</Text>
             <Text style={styles.subtitle}>
-              Split bills, track shared expenses, and settle balances effortlessly.
+              Manage your shared expenses effortlessly
             </Text>
           </View>
 
-          {/* Form */}
-          <View style={styles.formCard}>
-            <Text style={styles.inputLabel}>Mobile Number</Text>
-            <View style={styles.phoneInputRow}>
-              <View style={styles.countryCodeBadge}>
-                <Text style={styles.flag}>🇮🇳</Text>
-                <Text style={styles.countryCodeText}>+91</Text>
-              </View>
+          {/* Form Card */}
+          <View style={styles.card}>
+            {/* Email Login Section */}
+            <Text style={styles.inputLabel}>Email Address</Text>
+            <View
+              style={[
+                styles.inputWrapper,
+                emailError ? styles.inputWrapperError : null,
+              ]}
+            >
+              <Ionicons
+                name="mail-outline"
+                size={20}
+                color={emailError ? '#EF4444' : Color.textMuted}
+                style={styles.inputIcon}
+              />
               <TextInput
                 style={styles.textInput}
-                placeholder="98765 43210"
+                placeholder="name@example.com"
                 placeholderTextColor={Color.textMuted}
-                keyboardType="phone-pad"
-                maxLength={10}
-                value={phoneNumber}
-                onChangeText={setPhoneNumber}
-                autoFocus={false}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={email}
+                onChangeText={handleEmailChange}
+                editable={!loading && !googleLoading}
+                returnKeyType="send"
+                onSubmitEditing={handleRequestOtp}
               />
+              {email.trim().length > 0 && (
+                <TouchableOpacity
+                  onPress={() => setEmail('')}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="close-circle" size={18} color={Color.textMuted} />
+                </TouchableOpacity>
+              )}
             </View>
+
+            {emailError ? (
+              <View style={styles.errorRow}>
+                <Ionicons name="alert-circle" size={14} color="#EF4444" />
+                <Text style={styles.errorText}>{emailError}</Text>
+              </View>
+            ) : null}
 
             <TouchableOpacity
               style={[
-                styles.submitButton,
-                phoneNumber.length !== 10 && styles.disabledButton,
+                styles.continueButton,
+                (!isEmailValid || loading || googleLoading) && styles.disabledButton,
               ]}
               onPress={handleRequestOtp}
-              disabled={loading || phoneNumber.length !== 10}
+              disabled={loading || googleLoading || !isEmailValid}
               activeOpacity={0.8}
             >
               {loading ? (
-                <ActivityIndicator color={Color.white} />
+                <ActivityIndicator color={Color.white} size="small" />
               ) : (
                 <View style={styles.btnRow}>
-                  <Text style={styles.submitButtonText}>Get OTP</Text>
+                  <Text style={styles.continueButtonText}>Continue with Email</Text>
                   <Ionicons name="arrow-forward" size={18} color={Color.white} />
                 </View>
               )}
             </TouchableOpacity>
 
+            {/* OR Separator */}
             <View style={styles.dividerRow}>
               <View style={styles.dividerLine} />
               <Text style={styles.dividerText}>OR</Text>
               <View style={styles.dividerLine} />
             </View>
 
-            {/* Quick Demo Bypass */}
+            {/* Google Login Section */}
             <TouchableOpacity
-              style={styles.demoButton}
-              onPress={handleDemoLogin}
-              activeOpacity={0.7}
+              style={[
+                styles.googleButton,
+                googleLoading && styles.disabledButton,
+              ]}
+              onPress={handleGoogleButtonPress}
+              disabled={loading || googleLoading}
+              activeOpacity={0.8}
             >
-              <Ionicons name="sparkles" size={18} color={Color.primary} />
-              <Text style={styles.demoButtonText}>Explore Demo Account</Text>
+              {googleLoading ? (
+                <ActivityIndicator color="#1E293B" size="small" />
+              ) : (
+                <View style={styles.googleBtnRow}>
+                  {/* Google Logo Icon */}
+                  <View style={styles.googleIconContainer}>
+                    <Ionicons name="logo-google" size={19} color="#EA4335" />
+                  </View>
+                  <Text style={styles.googleButtonText}>Continue with Google</Text>
+                </View>
+              )}
             </TouchableOpacity>
           </View>
 
           {/* Compliance & Store Footer */}
           <View style={styles.footer}>
             <Text style={styles.legalNotice}>
-              By continuing, you agree to our{' '}
+              By signing in, you agree to our{' '}
               <Text style={styles.legalLink}>Terms of Service</Text> and{' '}
               <Text style={styles.legalLink}>Privacy Policy</Text>.
             </Text>
@@ -182,92 +282,100 @@ const styles = StyleSheet.create({
   scrollContent: {
     flexGrow: 1,
     paddingHorizontal: 24,
-    paddingTop: 40,
+    paddingTop: 36,
     paddingBottom: 24,
     justifyContent: 'space-between',
   },
   header: {
     alignItems: 'center',
-    marginBottom: 32,
+    marginBottom: 28,
   },
   logoBadge: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+    width: 76,
+    height: 76,
+    borderRadius: 38,
     backgroundColor: Color.primaryLight,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 18,
+    shadowColor: Color.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 3,
   },
   title: {
     fontSize: 26,
     fontWeight: '800',
     color: Color.text,
     textAlign: 'center',
+    letterSpacing: -0.3,
   },
   subtitle: {
     fontSize: 14,
     color: Color.textSecondary,
     textAlign: 'center',
     marginTop: 8,
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
     lineHeight: 20,
   },
-  formCard: {
+  card: {
     backgroundColor: Color.white,
-    borderRadius: 20,
+    borderRadius: 22,
     padding: 24,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
+    shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.06,
-    shadowRadius: 12,
+    shadowRadius: 16,
     elevation: 3,
   },
   inputLabel: {
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: 13,
+    fontWeight: '700',
     color: Color.text,
     marginBottom: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
-  phoneInputRow: {
+  inputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1.5,
     borderColor: Color.border,
     borderRadius: 14,
-    backgroundColor: Color.background,
-    overflow: 'hidden',
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
   },
-  countryCodeBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 14,
-    borderRightWidth: 1.5,
-    borderRightColor: Color.border,
-    backgroundColor: '#F1F5F9',
-    gap: 6,
+  inputWrapperError: {
+    borderColor: '#EF4444',
+    backgroundColor: '#FEF2F2',
   },
-  flag: {
-    fontSize: 18,
-  },
-  countryCodeText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: Color.text,
+  inputIcon: {
+    marginRight: 10,
   },
   textInput: {
     flex: 1,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
+    fontSize: 15,
     color: Color.text,
     fontWeight: '600',
-    letterSpacing: 1.2,
+    padding: 0,
   },
-  submitButton: {
+  errorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 6,
+    paddingHorizontal: 4,
+  },
+  errorText: {
+    fontSize: 12,
+    color: '#EF4444',
+    fontWeight: '500',
+  },
+  continueButton: {
     backgroundColor: Color.primary,
-    paddingVertical: 16,
+    paddingVertical: 15,
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
@@ -276,25 +384,25 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.25,
     shadowRadius: 8,
-    elevation: 4,
+    elevation: 3,
   },
   disabledButton: {
-    opacity: 0.6,
+    opacity: 0.5,
   },
   btnRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
   },
-  submitButtonText: {
+  continueButtonText: {
     color: Color.white,
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
   },
   dividerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginVertical: 20,
+    marginVertical: 22,
   },
   dividerLine: {
     flex: 1,
@@ -302,29 +410,44 @@ const styles = StyleSheet.create({
     backgroundColor: Color.border,
   },
   dividerText: {
-    marginHorizontal: 12,
+    marginHorizontal: 14,
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '700',
     color: Color.textMuted,
   },
-  demoButton: {
+  googleButton: {
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    backgroundColor: Color.white,
+    paddingVertical: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 1,
+  },
+  googleBtnRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    borderWidth: 1.5,
-    borderColor: Color.primary,
-    paddingVertical: 14,
-    borderRadius: 14,
-    backgroundColor: Color.primaryLight,
+    gap: 10,
   },
-  demoButtonText: {
-    color: Color.primary,
+  googleIconContainer: {
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  googleButtonText: {
+    color: '#1E293B',
     fontSize: 15,
     fontWeight: '700',
   },
   footer: {
-    marginTop: 24,
+    marginTop: 28,
     alignItems: 'center',
   },
   legalNotice: {

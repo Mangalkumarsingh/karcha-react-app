@@ -1,8 +1,5 @@
 import {
-  AuthRequestOtpPayload,
-  AuthRequestOtpResponse,
-  AuthVerifyOtpPayload,
-  AuthVerifyOtpResponse,
+  AuthResponse,
   CreateExpensePayload,
   CreateGroupPayload,
   GoogleLoginPayload,
@@ -11,31 +8,47 @@ import {
   GroupMember,
   PaginatedExpensesResponse,
   PaginatedSettlementsResponse,
+  RequestEmailOtpPayload,
+  RequestEmailOtpResponse,
   SettlementItem,
   SettlementRecordPayload,
   SharedExpense,
   UpdateGroupPayload,
   UpdateProfilePayload,
+  User,
   UserInvitation,
   UserProfile,
+  VerifyEmailOtpPayload,
 } from '../types/splitwise';
 import api from './client';
 
 export const splitwiseApi = {
   // 1. Authentication Module (/auth)
-  requestOtp: (phoneNumber: string) =>
-    api.post<AuthRequestOtpResponse>('/auth/otp/request', {
-      phoneNumber,
-    } as AuthRequestOtpPayload),
+  requestEmailOtp: (email: string) =>
+    api.post<RequestEmailOtpResponse>('/auth/email/otp/request', {
+      email,
+    } as RequestEmailOtpPayload),
 
-  verifyOtp: (phoneNumber: string, otp: string) =>
-    api.post<AuthVerifyOtpResponse>('/auth/otp/verify', {
-      phoneNumber,
+  verifyEmailOtp: (email: string, otp: string) =>
+    api.post<AuthResponse>('/auth/email/otp/verify', {
+      email,
       otp,
-    } as AuthVerifyOtpPayload),
+    } as VerifyEmailOtpPayload),
+
+  // Backward compatibility alias
+  requestOtp: (emailOrPhone: string) =>
+    api.post<RequestEmailOtpResponse>('/auth/email/otp/request', {
+      email: emailOrPhone,
+    }),
+
+  verifyOtp: (emailOrPhone: string, otp: string) =>
+    api.post<AuthResponse>('/auth/email/otp/verify', {
+      email: emailOrPhone,
+      otp,
+    }),
 
   googleLogin: (googleToken: string) =>
-    api.post<AuthVerifyOtpResponse>('/auth/google', {
+    api.post<AuthResponse>('/auth/google', {
       googleToken,
     } as GoogleLoginPayload),
 
@@ -63,8 +76,8 @@ export const splitwiseApi = {
     api.delete<{ success: boolean; message: string }>(`/groups/${groupId}`),
 
   // 4. Group Members & Invitations Module
-  inviteMember: (groupId: string, phoneNumber: string) =>
-    api.post<UserInvitation>(`/groups/${groupId}/invitations`, { phoneNumber }),
+  inviteMember: (groupId: string, email: string) =>
+    api.post<UserInvitation>(`/groups/${groupId}/invitations`, { email }),
 
   acceptInvitation: (invitationId: string) =>
     api.post<{ success: boolean; message: string }>(

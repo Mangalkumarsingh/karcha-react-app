@@ -17,6 +17,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  ToastAndroid,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -42,27 +43,33 @@ export default function AddExpenseScreen() {
   const [description, setDescription] = useState('');
   const [paidByUserId, setPaidByUserId] = useState<string>('');
   const [selectedParticipants, setSelectedParticipants] = useState<string[]>([]);
+  const [splitMode, setSplitMode] = useState<'EQUAL' | 'EXACT' | 'PERCENTAGE'>('EQUAL');
+  const [customShares, setCustomShares] = useState<{ [userId: string]: string }>({});
+  const [customPercentages, setCustomPercentages] = useState<{ [userId: string]: string }>({});
 
   // Update selectedGroupId if groups load and initialGroupId wasn't set
   useEffect(() => {
     if (!selectedGroupId && groups.length > 0) {
       setSelectedGroupId(groups[0].id);
     }
-  }, [groups, selectedGroupId]);
+  }, [groups]);
 
   // When members load, initialize paidBy and participants
+  const membersKey = members.map((m) => m.userId).join(',');
+  const currentUserId = user?.id;
+
   useEffect(() => {
     if (members.length > 0) {
       // Default paidBy to current user or first member
-      const myMember = members.find((m) => m.userId === user?.id);
+      const myMember = members.find((m) => m.userId === currentUserId);
       setPaidByUserId(myMember ? myMember.userId : members[0].userId);
       // Default participants: select all members
       setSelectedParticipants(members.map((m) => m.userId));
-    } else if (user?.id) {
-      setPaidByUserId(user.id);
-      setSelectedParticipants([user.id]);
+    } else if (currentUserId) {
+      setPaidByUserId(currentUserId);
+      setSelectedParticipants([currentUserId]);
     }
-  }, [members, user]);
+  }, [membersKey, currentUserId]);
 
   const toggleParticipant = (userId: string) => {
     if (selectedParticipants.includes(userId)) {
@@ -102,26 +109,126 @@ export default function AddExpenseScreen() {
       return;
     }
 
+    // Build splits based on splitMode
+    let splits: { userId: string; userName: string; shareAmount: number; percentage?: number }[] = [];
+    if (splitMode === 'EQUAL') {
+      const share = parsedAmount / selectedParticipants.length;
+      splits = selectedParticipants.map((id) => {
+        const mem = members.find((m) => m.userId === id);
+        return {
+          userId: id,
+          userName: mem ? mem.name : (id === user?.id ? 'You' : 'Member'),
+          shareAmount: parseFloat(share.toFixed(2)),
+        };
+      });
+    } else if (splitMode === 'EXACT') {
+      let sum = 0;
+      for (const id of selectedParticipants) {
+        const val = parseFloat(customShares[id] || '0');
+        sum += val;
+        const mem = members.find((m) => m.userId === id);
+        splits.push({
+          userId: id,
+          userName: mem ? mem.name : (id === user?.id ? 'You' : 'Member'),
+          shareAmount: val,
+        });
+      }
+      if (Math.abs(sum - parsedAmount) > 0.5) {
+        Alert.alert(
+          'Split Mismatch',
+          `The unequal shares sum to ₹${sum.toFixed(2)}, which does not match total amount ₹${parsedAmount.toFixed(2)}.`
+        );
+        return;
+      }
+    } else if (splitMode === 'PERCENTAGE') {
+      let percentSum = 0;
+      for (const id of selectedParticipants) {
+        const pct = parseFloat(customPercentages[id] || '0');
+        percentSum += pct;
+        const share = (parsedAmount * pct) / 100;
+        const mem = members.find((m) => m.userId === id);
+        splits.push({
+          userId: id,
+          userName: mem ? mem.name : (id === user?.id ? 'You' : 'Member'),
+          shareAmount: parseFloat(share.toFixed(2)),
+          percentage: pct,
+        });
+      }
+      if (Math.abs(percentSum - 100) > 0.5) {
+        Alert.alert(
+          'Percentage Mismatch',
+          `The percentages sum to ${percentSum.toFixed(1)}%. Total must be 100%.`
+        );
+        return;
+      }
+    }
+
+    // Ensure splits match exact backend PRD specification: [{ userId, shareAmount }]
+    const cleanSplits = splits.map((s) => ({
+      userId: s.userId,
+      shareAmount: s.shareAmount,
+    }));
+
     try {
       await addExpenseMutation.mutateAsync({
         title: title.trim(),
         description: description.trim() || undefined,
         amount: parsedAmount,
-        paidByUserId: paidByUserId || user?.id || 'demo_user',
-        splitType: 'EQUAL',
+        currency: 'INR',
+        paidByUserId: paidByUserId || user?.id || '',
+        splitType: splitMode,
         participantIds: selectedParticipants,
-      });
+        splits: cleanSplits,
+      } as any);
 
-      Alert.alert('Success', 'Expense added successfully!');
+      if (Platform.OS === 'android') {
+        ToastAndroid.show('Expense added successfully to server!', ToastAndroid.SHORT);
+      }
       router.back();
     } catch (err: any) {
-      Alert.alert(
-        'Expense Recorded',
-        err.response?.data?.message || err.message || 'Expense saved.'
-      );
-      router.back();
+      const errorMsg =
+        err.response?.data?.message ||
+        err.response?.data?.error ||
+        err.message ||
+        'Server failed to save expense. Please check connection and try again.';
+      Alert.alert('Backend Error', errorMsg);
     }
   };
+
+  if (groups.length === 0) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.backBtn}
+            onPress={() => router.back()}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="arrow-back" size={24} color={Color.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Add an expense</Text>
+          <View style={{ width: 40 }} />
+        </View>
+
+        <View style={styles.noGroupContainer}>
+          <View style={styles.noGroupIconCircle}>
+            <Ionicons name="people-outline" size={48} color={Color.primary} />
+          </View>
+          <Text style={styles.noGroupTitle}>No group present</Text>
+          <Text style={styles.noGroupSubtitle}>
+            You must create or join a group before you can add an expense.
+          </Text>
+          <TouchableOpacity
+            style={styles.createGroupBtn}
+            onPress={() => router.replace('/(tabs)/Home' as any)}
+          >
+            <Ionicons name="add-circle-outline" size={20} color={Color.white} />
+            <Text style={styles.createGroupBtnText}>Create Group</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
@@ -264,11 +371,89 @@ export default function AddExpenseScreen() {
             </ScrollView>
           </View>
 
+          {/* Split Mode Selector (Equal, Unequal/Exact, Percentage) */}
+          <View style={styles.section}>
+            <Text style={styles.fieldLabel}>Split Method</Text>
+            <View style={styles.splitModeRow}>
+              <TouchableOpacity
+                style={[
+                  styles.splitModeBtn,
+                  splitMode === 'EQUAL' && styles.splitModeBtnActive,
+                ]}
+                onPress={() => setSplitMode('EQUAL')}
+              >
+                <Ionicons
+                  name="pie-chart-outline"
+                  size={16}
+                  color={splitMode === 'EQUAL' ? Color.white : Color.text}
+                />
+                <Text
+                  style={[
+                    styles.splitModeBtnText,
+                    splitMode === 'EQUAL' && styles.splitModeBtnTextActive,
+                  ]}
+                >
+                  Equal (=)
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.splitModeBtn,
+                  splitMode === 'EXACT' && styles.splitModeBtnActive,
+                ]}
+                onPress={() => setSplitMode('EXACT')}
+              >
+                <Ionicons
+                  name="cash-outline"
+                  size={16}
+                  color={splitMode === 'EXACT' ? Color.white : Color.text}
+                />
+                <Text
+                  style={[
+                    styles.splitModeBtnText,
+                    splitMode === 'EXACT' && styles.splitModeBtnTextActive,
+                  ]}
+                >
+                  Unequal (₹)
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.splitModeBtn,
+                  splitMode === 'PERCENTAGE' && styles.splitModeBtnActive,
+                ]}
+                onPress={() => setSplitMode('PERCENTAGE')}
+              >
+                <Ionicons
+                  name="stats-chart-outline"
+                  size={16}
+                  color={splitMode === 'PERCENTAGE' ? Color.white : Color.text}
+                />
+                <Text
+                  style={[
+                    styles.splitModeBtnText,
+                    splitMode === 'PERCENTAGE' && styles.splitModeBtnTextActive,
+                  ]}
+                >
+                  Percentage (%)
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
           {/* Split Options */}
           <View style={styles.section}>
             <View style={styles.splitHeader}>
-              <Text style={styles.fieldLabel}>Split equally between</Text>
-              {perPersonShare > 0 && (
+              <Text style={styles.fieldLabel}>
+                {splitMode === 'EQUAL'
+                  ? 'Split equally between'
+                  : splitMode === 'EXACT'
+                  ? 'Enter exact amount for each'
+                  : 'Enter percentage for each'}
+              </Text>
+              {splitMode === 'EQUAL' && perPersonShare > 0 && (
                 <Text style={styles.shareBadge}>
                   ₹{perPersonShare.toFixed(2)} / person
                 </Text>
@@ -284,28 +469,65 @@ export default function AddExpenseScreen() {
                 members.map((m) => {
                   const isChecked = selectedParticipants.includes(m.userId);
                   return (
-                    <TouchableOpacity
-                      key={m.userId}
-                      style={styles.participantRow}
-                      onPress={() => toggleParticipant(m.userId)}
-                      activeOpacity={0.7}
-                    >
-                      <View style={styles.participantLeft}>
-                        <Ionicons
-                          name={isChecked ? 'checkbox' : 'square-outline'}
-                          size={22}
-                          color={isChecked ? Color.primary : Color.textMuted}
-                        />
-                        <Text style={styles.participantName}>
-                          {m.name} {m.userId === user?.id ? '(You)' : ''}
-                        </Text>
-                      </View>
-                      {isChecked && perPersonShare > 0 && (
-                        <Text style={styles.participantShare}>
-                          ₹{perPersonShare.toFixed(2)}
-                        </Text>
+                    <View key={m.userId} style={styles.participantRowContainer}>
+                      <TouchableOpacity
+                        style={styles.participantRow}
+                        onPress={() => toggleParticipant(m.userId)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={styles.participantLeft}>
+                          <Ionicons
+                            name={isChecked ? 'checkbox' : 'square-outline'}
+                            size={22}
+                            color={isChecked ? Color.primary : Color.textMuted}
+                          />
+                          <Text style={styles.participantName}>
+                            {m.name} {m.userId === user?.id ? '(You)' : ''}
+                          </Text>
+                        </View>
+                        {isChecked && splitMode === 'EQUAL' && perPersonShare > 0 && (
+                          <Text style={styles.participantShare}>
+                            ₹{perPersonShare.toFixed(2)}
+                          </Text>
+                        )}
+                      </TouchableOpacity>
+
+                      {/* Custom input fields for Unequal and Percentage splits */}
+                      {isChecked && splitMode === 'EXACT' && (
+                        <View style={styles.customSplitInputRow}>
+                          <Text style={styles.customSplitCurrency}>₹</Text>
+                          <TextInput
+                            style={styles.customSplitInput}
+                            placeholder="0.00"
+                            placeholderTextColor={Color.textMuted}
+                            keyboardType="decimal-pad"
+                            value={customShares[m.userId] || ''}
+                            onChangeText={(val) =>
+                              setCustomShares({ ...customShares, [m.userId]: val })
+                            }
+                          />
+                        </View>
                       )}
-                    </TouchableOpacity>
+
+                      {isChecked && splitMode === 'PERCENTAGE' && (
+                        <View style={styles.customSplitInputRow}>
+                          <TextInput
+                            style={styles.customSplitInput}
+                            placeholder="0"
+                            placeholderTextColor={Color.textMuted}
+                            keyboardType="decimal-pad"
+                            value={customPercentages[m.userId] || ''}
+                            onChangeText={(val) =>
+                              setCustomPercentages({
+                                ...customPercentages,
+                                [m.userId]: val,
+                              })
+                            }
+                          />
+                          <Text style={styles.customSplitCurrency}>%</Text>
+                        </View>
+                      )}
+                    </View>
                   );
                 })
               )}
@@ -550,6 +772,112 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   bottomSaveBtnText: {
+    color: Color.white,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  splitModeRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  splitModeBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: Color.white,
+    borderWidth: 1.5,
+    borderColor: Color.border,
+  },
+  splitModeBtnActive: {
+    backgroundColor: Color.primary,
+    borderColor: Color.primary,
+  },
+  splitModeBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Color.text,
+  },
+  splitModeBtnTextActive: {
+    color: Color.white,
+  },
+  participantRowContainer: {
+    borderBottomWidth: 1,
+    borderBottomColor: Color.borderLight,
+    paddingVertical: 4,
+  },
+  customSplitInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 8,
+    paddingBottom: 8,
+    gap: 4,
+  },
+  customSplitCurrency: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: Color.primary,
+  },
+  customSplitInput: {
+    width: 90,
+    backgroundColor: Color.background,
+    borderWidth: 1.5,
+    borderColor: Color.border,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    fontSize: 14,
+    fontWeight: '700',
+    color: Color.text,
+    textAlign: 'right',
+  },
+  noGroupContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
+  },
+  noGroupIconCircle: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    backgroundColor: Color.primaryLight,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  noGroupTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: Color.text,
+    marginBottom: 8,
+  },
+  noGroupSubtitle: {
+    fontSize: 14,
+    color: Color.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  createGroupBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: Color.primary,
+    paddingHorizontal: 22,
+    paddingVertical: 14,
+    borderRadius: 14,
+    shadowColor: Color.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  createGroupBtnText: {
     color: Color.white,
     fontSize: 16,
     fontWeight: '700',

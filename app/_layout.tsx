@@ -33,6 +33,7 @@ export default function RootLayout() {
           <Stack.Screen name="auth/Login" options={{ headerShown: false }} />
           <Stack.Screen name="auth/otp" options={{ headerShown: false }} />
           <Stack.Screen name="GroupDetail" options={{ headerShown: false }} />
+          <Stack.Screen name="GroupBalancesScreen" options={{ headerShown: false }} />
           <Stack.Screen name="AddExpense" options={{ headerShown: false }} />
           <Stack.Screen name="ExpenseDetail" options={{ headerShown: false }} />
           <Stack.Screen name="SettleUp" options={{ headerShown: false, presentation: 'modal' }} />

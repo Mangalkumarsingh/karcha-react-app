@@ -1,45 +1,54 @@
 // TypeScript definitions for Splitwise / Expense Tracking API
 
-export interface AuthRequestOtpPayload {
-  phoneNumber: string;
+export interface RequestEmailOtpPayload {
+  email: string;
 }
 
-export interface AuthRequestOtpResponse {
+export interface RequestEmailOtpResponse {
   success: boolean;
   message: string;
-  expiresInSeconds: number;
-  resendAfterSeconds: number;
+  expiresInSeconds?: number;
+  resendAfterSeconds?: number;
 }
 
-export interface AuthVerifyOtpPayload {
-  phoneNumber: string;
+export interface VerifyEmailOtpPayload {
+  email: string;
   otp: string;
-}
-
-export interface AuthVerifyOtpResponse {
-  id: string;
-  phoneNumber: string;
-  email: string | null;
-  loginType: string;
-  newUser: boolean;
-  accessToken: string;
-  tokenType: string;
-  expiresIn: number;
-  message: string;
 }
 
 export interface GoogleLoginPayload {
   googleToken: string;
 }
 
-export interface UserProfile {
+export interface User {
   id: string;
   name: string;
-  phoneNumber: string;
-  email?: string | null;
+  email: string | null;
+  phoneNumber?: string | null;
   profileImageUrl?: string | null;
   createdAt?: string;
+  updatedAt?: string;
 }
+
+export interface AuthResponse {
+  accessToken: string;
+  tokenType: string;
+  expiresIn?: number;
+  user?: User;
+  id?: string;
+  email?: string | null;
+  name?: string;
+  phoneNumber?: string | null;
+  newUser?: boolean;
+  message?: string;
+}
+
+// Backward compatibility aliases
+export type AuthRequestOtpPayload = RequestEmailOtpPayload | { phoneNumber: string };
+export type AuthRequestOtpResponse = RequestEmailOtpResponse;
+export type AuthVerifyOtpPayload = VerifyEmailOtpPayload | { phoneNumber: string; otp: string };
+export type AuthVerifyOtpResponse = AuthResponse;
+export type UserProfile = User;
 
 export interface UpdateProfilePayload {
   name?: string;
@@ -80,7 +89,8 @@ export interface GroupItem {
   currency: string;
   memberCount: number;
   totalExpenses: number;
-  currentUserNetBalance: number;
+  currentUserNetBalance?: number;
+  myNetBalance?: number;
   createdAt: string;
   createdBy?: {
     id: string;
@@ -93,6 +103,7 @@ export interface CreateGroupPayload {
   name: string;
   description?: string;
   currency?: string;
+  initialMembers?: { name: string; phoneNumber?: string }[];
 }
 
 export interface UpdateGroupPayload {
@@ -104,6 +115,7 @@ export interface ExpenseSplit {
   userId: string;
   userName: string;
   shareAmount: number;
+  percentage?: number;
 }
 
 export interface SharedExpense {
@@ -134,6 +146,7 @@ export interface CreateExpensePayload {
   paidByUserId: string;
   splitType: 'EQUAL' | 'EXACT' | 'PERCENTAGE';
   participantIds: string[];
+  splits?: ExpenseSplit[];
 }
 
 export interface PaginatedExpensesResponse {

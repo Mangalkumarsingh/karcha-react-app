@@ -1,9 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
+import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
 // In-memory token cache for synchronous and instant access in interceptors
 let cachedToken: string | null = null;
+
+// Secure token storage helpers
+const SECURE_TOKEN_KEY = 'kharcha_access_token';
 
 // Determine appropriate default base URL
 const getBaseUrl = (): string => {
@@ -13,7 +17,7 @@ const getBaseUrl = (): string => {
   if (typeof process !== 'undefined' && process.env?.REACT_APP_API_BASE_URL) {
     return process.env.REACT_APP_API_BASE_URL;
   }
-  return 'https://karcha-backend-project.onrender.com/api/v1';
+  return 'https://kharcha-backend-node.vercel.app/api/v1';
 };
 
 const api = axios.create({
@@ -27,20 +31,33 @@ const api = axios.create({
 // Initialize cached token on app start
 export const initToken = async (): Promise<string | null> => {
   try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const webToken = window.localStorage.getItem('accessToken');
-      if (webToken) {
-        cachedToken = webToken;
-        return webToken;
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const webToken = window.localStorage.getItem(SECURE_TOKEN_KEY);
+        if (webToken) {
+          cachedToken = webToken;
+          return webToken;
+        }
+      }
+    } else {
+      const secureToken = await SecureStore.getItemAsync(SECURE_TOKEN_KEY);
+      if (secureToken) {
+        cachedToken = secureToken;
+        return secureToken;
       }
     }
-    const token = await AsyncStorage.getItem('accessToken');
-    if (token) {
-      cachedToken = token;
-      return token;
+
+    // Fallback to AsyncStorage for migration from previous app versions
+    const legacyToken = await AsyncStorage.getItem('accessToken');
+    if (legacyToken) {
+      cachedToken = legacyToken;
+      // Migrate to secure storage
+      await setAccessToken(legacyToken);
+      await AsyncStorage.removeItem('accessToken').catch(() => {});
+      return legacyToken;
     }
   } catch (e) {
-    console.warn('Error reading token from storage:', e);
+    console.warn('Error reading token from secure storage:', e);
   }
   return null;
 };
@@ -49,12 +66,19 @@ export const initToken = async (): Promise<string | null> => {
 export const setAccessToken = async (token: string): Promise<void> => {
   cachedToken = token;
   try {
-    await AsyncStorage.setItem('accessToken', token);
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem('accessToken', token);
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(SECURE_TOKEN_KEY, token);
+      }
+    } else {
+      await SecureStore.setItemAsync(SECURE_TOKEN_KEY, token);
     }
   } catch (e) {
-    console.error('Error saving access token:', e);
+    console.error('Error saving access token to secure store:', e);
+    // Fallback to AsyncStorage if SecureStore fails
+    try {
+      await AsyncStorage.setItem('accessToken', token);
+    } catch {}
   }
 };
 
@@ -68,12 +92,16 @@ export const getAccessToken = async (): Promise<string | null> => {
 export const clearAccessToken = async (): Promise<void> => {
   cachedToken = null;
   try {
-    await AsyncStorage.removeItem('accessToken');
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.removeItem('accessToken');
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.removeItem(SECURE_TOKEN_KEY);
+      }
+    } else {
+      await SecureStore.deleteItemAsync(SECURE_TOKEN_KEY);
     }
+    await AsyncStorage.removeItem('accessToken');
   } catch (e) {
-    console.error('Error removing access token:', e);
+    console.error('Error removing access token from storage:', e);
   }
 };
 

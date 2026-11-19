@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { splitwiseApi } from '../api/splitwiseService';
 import {
   CreateExpensePayload,
@@ -12,8 +12,11 @@ import {
 import {
   createLocalExpense,
   createLocalGroup,
+  createLocalSettlement,
+  getAllStoredExpenses,
   getStoredExpenses,
   getStoredGroups,
+  getStoredSettlements,
   saveStoredGroups,
 } from '../utils/offlineStorage';
 
@@ -28,6 +31,7 @@ export const queryKeys = {
     ['groups', id, 'expenses', page] as const,
   expense: (groupId: string, expenseId: string) =>
     ['groups', groupId, 'expenses', expenseId] as const,
+  allExpenses: ['expenses', 'all'] as const,
   groupBalances: (id: string) => ['groups', id, 'balances'] as const,
   groupSettlements: (id: string, page = 0) =>
     ['groups', id, 'settlements', page] as const,
@@ -128,7 +132,7 @@ export const useMyGroups = () => {
     queryFn: async () => {
       try {
         const res = await splitwiseApi.getMyGroups();
-        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+        if (res.data && Array.isArray(res.data)) {
           await saveStoredGroups(res.data);
           return res.data;
         }
@@ -244,6 +248,17 @@ export const useDeleteGroup = () => {
   });
 };
 
+const DEFAULT_FALLBACK_MEMBERS: GroupMember[] = [
+  {
+    id: 'mem_1',
+    userId: 'usr_me',
+    name: 'You',
+    role: 'ADMIN',
+    status: 'ACTIVE',
+    joinedAt: new Date().toISOString(),
+  },
+];
+
 // --- Members Hooks ---
 export const useGroupMembers = (groupId?: string) => {
   return useQuery({
@@ -260,17 +275,7 @@ export const useGroupMembers = (groupId?: string) => {
       }
       const localGroups = await getStoredGroups();
       const found = localGroups.find((g) => g.id === groupId);
-      const defaultMembers: GroupMember[] = [
-        {
-          id: 'mem_1',
-          userId: 'usr_me',
-          name: 'You',
-          role: 'ADMIN',
-          status: 'ACTIVE',
-          joinedAt: new Date().toISOString(),
-        },
-      ];
-      return found?.members || defaultMembers;
+      return found?.members || DEFAULT_FALLBACK_MEMBERS;
     },
     enabled: !!groupId,
     staleTime: 1000 * 60 * 2,
@@ -280,22 +285,9 @@ export const useGroupMembers = (groupId?: string) => {
 export const useInviteMember = (groupId: string) => {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (phoneNumber: string) => {
-      try {
-        const res = await splitwiseApi.inviteMember(groupId, phoneNumber);
-        return res.data;
-      } catch {
-        return {
-          id: 'inv_' + Date.now(),
-          groupId,
-          groupName: 'Group',
-          invitedPhoneNumber: phoneNumber,
-          status: 'PENDING' as const,
-          createdAt: new Date().toISOString(),
-          expiresAt: new Date().toISOString(),
-          invitedBy: { id: 'usr_me', name: 'You' },
-        };
-      }
+    mutationFn: async (emailOrPhone: string) => {
+      const res = await splitwiseApi.inviteMember(groupId, emailOrPhone);
+      return res.data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({
@@ -355,6 +347,43 @@ export const useGroupExpenses = (groupId?: string, page = 0, size = 20) => {
   });
 };
 
+export const useInfiniteGroupExpenses = (groupId?: string, size = 20) => {
+  return useInfiniteQuery({
+    queryKey: ['groups', groupId || '', 'expenses', 'infinite'] as const,
+    queryFn: async ({ pageParam = 0 }) => {
+      if (!groupId) {
+        return { content: [], totalElements: 0, totalPages: 1, number: 0 };
+      }
+      try {
+        const res = await splitwiseApi.getGroupExpenses(groupId, pageParam, size);
+        if (res.data && res.data.content) {
+          return res.data;
+        }
+      } catch (err) {
+        console.warn('Backend paginated expenses fetch error, falling back to local.');
+      }
+      const local = await getStoredExpenses(groupId);
+      const start = pageParam * size;
+      const paginatedContent = local.slice(start, start + size);
+      return {
+        content: paginatedContent,
+        totalElements: local.length,
+        totalPages: Math.ceil(local.length / size) || 1,
+        number: pageParam,
+      };
+    },
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => {
+      if (!lastPage || lastPage.number + 1 >= lastPage.totalPages) {
+        return undefined;
+      }
+      return lastPage.number + 1;
+    },
+    enabled: !!groupId,
+    staleTime: 1000 * 60 * 1,
+  });
+};
+
 export const useExpenseDetails = (groupId?: string, expenseId?: string) => {
   return useQuery({
     queryKey: queryKeys.expense(groupId || '', expenseId || ''),
@@ -386,27 +415,84 @@ export const useExpenseDetails = (groupId?: string, expenseId?: string) => {
   });
 };
 
+export const useAllExpenses = () => {
+  return useQuery({
+    queryKey: queryKeys.allExpenses,
+    queryFn: async () => {
+      // 1. Fetch user groups first
+      let groups: GroupItem[] = [];
+      try {
+        const groupsRes = await splitwiseApi.getMyGroups();
+        if (groupsRes.data && Array.isArray(groupsRes.data)) {
+          groups = groupsRes.data;
+        }
+      } catch (e) {
+        // Fallback to local
+      }
+
+      if (groups.length === 0) {
+        groups = await getStoredGroups();
+      }
+
+      // 2. Fetch expenses from each group concurrently from backend
+      const expensePromises = groups.map(async (g) => {
+        try {
+          const res = await splitwiseApi.getGroupExpenses(g.id, 0, 50);
+          if (res.data?.content && Array.isArray(res.data.content)) {
+            return res.data.content;
+          }
+        } catch (e) {
+          // If server call fails, fallback to local group expenses
+        }
+        return await getStoredExpenses(g.id);
+      });
+
+      const results = await Promise.all(expensePromises);
+      const combined = results.flat();
+
+      if (combined.length > 0) {
+        return combined;
+      }
+
+      return await getAllStoredExpenses();
+    },
+    staleTime: 1000 * 30, // 30 seconds
+  });
+};
+
 export const useAddExpense = (groupId: string) => {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (payload: CreateExpensePayload) => {
       try {
         const res = await splitwiseApi.addExpense(groupId, payload);
-        if (res.data && res.data.id) return res.data;
+        if (res.data && res.data.id) {
+          // If server succeeded, also save to local storage for offline fast read
+          try {
+            await createLocalExpense(groupId, payload);
+          } catch {}
+          return res.data;
+        }
+        return res.data;
       } catch (err: any) {
-        console.warn('Backend addExpense failed, saving locally:', err.message);
+        console.error('Backend addExpense error response:', err.response?.data || err.message);
+        // Do NOT silently swallow backend failure! Propagate the actual backend error so the user is informed
+        throw err;
       }
-      return await createLocalExpense(groupId, payload);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: queryKeys.groupExpenses(groupId),
       });
       queryClient.invalidateQueries({
+        queryKey: ['groups', groupId, 'expenses'],
+      });
+      queryClient.invalidateQueries({
         queryKey: queryKeys.groupBalances(groupId),
       });
       queryClient.invalidateQueries({ queryKey: queryKeys.group(groupId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.groups });
+      queryClient.invalidateQueries({ queryKey: queryKeys.allExpenses });
     },
   });
 };
@@ -430,9 +516,14 @@ export const useUpdateExpense = (groupId: string, expenseId: string) => {
         queryKey: queryKeys.groupExpenses(groupId),
       });
       queryClient.invalidateQueries({
+        queryKey: ['groups', groupId, 'expenses'],
+      });
+      queryClient.invalidateQueries({
         queryKey: queryKeys.groupBalances(groupId),
       });
+      queryClient.invalidateQueries({ queryKey: queryKeys.group(groupId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.groups });
+      queryClient.invalidateQueries({ queryKey: queryKeys.allExpenses });
     },
   });
 };
@@ -453,10 +544,14 @@ export const useDeleteExpense = (groupId: string) => {
         queryKey: queryKeys.groupExpenses(groupId),
       });
       queryClient.invalidateQueries({
+        queryKey: ['groups', groupId, 'expenses'],
+      });
+      queryClient.invalidateQueries({
         queryKey: queryKeys.groupBalances(groupId),
       });
       queryClient.invalidateQueries({ queryKey: queryKeys.group(groupId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.groups });
+      queryClient.invalidateQueries({ queryKey: queryKeys.allExpenses });
     },
   });
 };
@@ -481,23 +576,120 @@ export const useGroupBalances = (groupId?: string) => {
         console.warn('Backend balances unavailable, using local calculation.');
       }
       const expenses = await getStoredExpenses(groupId);
+      const settlements = await getStoredSettlements(groupId);
+      const groups = await getStoredGroups();
+      const currentGroup = groups.find((g) => g.id === groupId);
+      const members = currentGroup?.members || [
+        { id: 'mem_1', userId: 'usr_me', name: 'You', role: 'ADMIN' as const, status: 'ACTIVE' as const, joinedAt: '' },
+      ];
+
       const total = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+
+      // Track paid, share, settlementsSent, and settlementsReceived for each member
+      const memberMap: {
+        [userId: string]: {
+          name: string;
+          paid: number;
+          share: number;
+          sent: number;
+          received: number;
+        };
+      } = {};
+      members.forEach((m) => {
+        memberMap[m.userId] = { name: m.name, paid: 0, share: 0, sent: 0, received: 0 };
+      });
+
+      expenses.forEach((e) => {
+        const payerId = e.paidBy?.id;
+        if (payerId) {
+          if (!memberMap[payerId]) {
+            memberMap[payerId] = { name: e.paidBy?.name || 'Member', paid: 0, share: 0, sent: 0, received: 0 };
+          }
+          memberMap[payerId].paid += e.amount;
+        }
+
+        if (e.splits && e.splits.length > 0) {
+          e.splits.forEach((s) => {
+            if (!memberMap[s.userId]) {
+              memberMap[s.userId] = { name: s.userName || 'Member', paid: 0, share: 0, sent: 0, received: 0 };
+            }
+            memberMap[s.userId].share += s.shareAmount;
+          });
+        } else {
+          const count = e.participantCount || 1;
+          const share = e.amount / count;
+          if (payerId && memberMap[payerId]) {
+            memberMap[payerId].share += share;
+          }
+        }
+      });
+
+      settlements.forEach((s) => {
+        if (s.status === 'CONFIRMED') {
+          if (s.fromUser?.id) {
+            if (!memberMap[s.fromUser.id]) {
+              memberMap[s.fromUser.id] = { name: s.fromUser.name || 'Member', paid: 0, share: 0, sent: 0, received: 0 };
+            }
+            memberMap[s.fromUser.id].sent += s.amount;
+          }
+          if (s.toUser?.id) {
+            if (!memberMap[s.toUser.id]) {
+              memberMap[s.toUser.id] = { name: s.toUser.name || 'Member', paid: 0, share: 0, sent: 0, received: 0 };
+            }
+            memberMap[s.toUser.id].received += s.amount;
+          }
+        }
+      });
+
+      const memberBalances = Object.keys(memberMap).map((uId) => {
+        const info = memberMap[uId];
+        return {
+          userId: uId,
+          name: info.name,
+          totalPaid: info.paid,
+          totalShare: info.share,
+          settlementsSent: info.sent,
+          settlementsReceived: info.received,
+          netBalance: info.paid - info.share + info.sent - info.received,
+        };
+      });
+
+      // Simplified debt transfers
+      const creditors = memberBalances
+        .filter((m) => m.netBalance > 0.01)
+        .map((m) => ({ ...m, remaining: m.netBalance }));
+      const debtors = memberBalances
+        .filter((m) => m.netBalance < -0.01)
+        .map((m) => ({ ...m, remaining: Math.abs(m.netBalance) }));
+
+      const suggestedTransfers = [];
+      let cIdx = 0;
+      let dIdx = 0;
+      while (cIdx < creditors.length && dIdx < debtors.length) {
+        const cred = creditors[cIdx];
+        const deb = debtors[dIdx];
+        const amount = Math.min(cred.remaining, deb.remaining);
+        if (amount > 0.01) {
+          suggestedTransfers.push({
+            fromUserId: deb.userId,
+            fromUserName: deb.name,
+            toUserId: cred.userId,
+            toUserName: cred.name,
+            amount: parseFloat(amount.toFixed(2)),
+          });
+        }
+        cred.remaining -= amount;
+        deb.remaining -= amount;
+        if (cred.remaining <= 0.01) cIdx++;
+        if (deb.remaining <= 0.01) dIdx++;
+      }
+
       return {
         groupId,
         currency: 'INR',
         totalExpenses: total,
-        memberBalances: [
-          {
-            userId: 'usr_me',
-            name: 'You',
-            totalPaid: total,
-            totalShare: total / 2,
-            settlementsSent: 0,
-            settlementsReceived: 0,
-            netBalance: total / 2,
-          },
-        ],
-        suggestedTransfers: [],
+        memberBalances,
+        suggestedTransfers,
       };
     },
     enabled: !!groupId,
@@ -514,10 +706,14 @@ export const useGroupSettlements = (groupId?: string, page = 0, size = 20) => {
         return { content: [], totalElements: 0, totalPages: 1, number: 0 };
       try {
         const res = await splitwiseApi.getSettlements(groupId, page, size);
-        return res.data;
+        if (res.data && res.data.content && res.data.content.length > 0) {
+          return res.data;
+        }
       } catch {
-        return { content: [], totalElements: 0, totalPages: 1, number: 0 };
+        // Fallback to local settlements
       }
+      const local = await getStoredSettlements(groupId);
+      return { content: local, totalElements: local.length, totalPages: 1, number: 0 };
     },
     enabled: !!groupId,
   });
@@ -529,20 +725,14 @@ export const useRecordSettlement = (groupId: string) => {
     mutationFn: async (payload: SettlementRecordPayload) => {
       try {
         const res = await splitwiseApi.recordSettlement(groupId, payload);
-        return res.data;
-      } catch {
-        return {
-          id: 'stl_' + Date.now(),
-          groupId,
-          fromUser: { id: payload.fromUserId, name: 'You' },
-          toUser: { id: payload.toUserId, name: 'Friend' },
-          amount: payload.amount,
-          currency: 'INR',
-          paymentMethod: payload.paymentMethod || 'UPI',
-          status: 'CONFIRMED' as const,
-          createdAt: new Date().toISOString(),
-        };
+        if (res.data) {
+          await createLocalSettlement(groupId, payload, payload.fromUserId);
+          return res.data;
+        }
+      } catch (err: any) {
+        console.warn('Backend recordSettlement failed or offline, saving locally:', err.message);
       }
+      return await createLocalSettlement(groupId, payload, payload.fromUserId);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({
@@ -553,6 +743,7 @@ export const useRecordSettlement = (groupId: string) => {
       });
       queryClient.invalidateQueries({ queryKey: queryKeys.group(groupId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.groups });
+      queryClient.invalidateQueries({ queryKey: queryKeys.allExpenses });
     },
   });
 };
@@ -577,6 +768,7 @@ export const useConfirmSettlement = (groupId: string) => {
       });
       queryClient.invalidateQueries({ queryKey: queryKeys.group(groupId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.groups });
+      queryClient.invalidateQueries({ queryKey: queryKeys.allExpenses });
     },
   });
 };

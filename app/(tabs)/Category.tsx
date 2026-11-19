@@ -18,17 +18,23 @@ export default function BalancesTabScreen() {
   const router = useRouter();
   const { data: groups = [], isLoading, refetch, isRefetching } = useMyGroups();
 
+  const getGroupNetBalance = (g: GroupItem): number => {
+    if (typeof g.myNetBalance === 'number') return g.myNetBalance;
+    if (typeof g.currentUserNetBalance === 'number') return g.currentUserNetBalance;
+    return 0;
+  };
+
   const { owedGroups, owingGroups, settledGroups } = useMemo(() => {
-    const owed = groups.filter((g: GroupItem) => (g.currentUserNetBalance || 0) > 0);
-    const owing = groups.filter((g: GroupItem) => (g.currentUserNetBalance || 0) < 0);
-    const settled = groups.filter((g: GroupItem) => (g.currentUserNetBalance || 0) === 0);
+    const owed = groups.filter((g: GroupItem) => getGroupNetBalance(g) > 0);
+    const owing = groups.filter((g: GroupItem) => getGroupNetBalance(g) < 0);
+    const settled = groups.filter((g: GroupItem) => getGroupNetBalance(g) === 0);
     return { owedGroups: owed, owingGroups: owing, settledGroups: settled };
   }, [groups]);
 
   const totalOwed = useMemo(
     () =>
       owedGroups.reduce(
-        (sum: number, g: GroupItem) => sum + (g.currentUserNetBalance || 0),
+        (sum: number, g: GroupItem) => sum + getGroupNetBalance(g),
         0
       ),
     [owedGroups]
@@ -37,7 +43,7 @@ export default function BalancesTabScreen() {
   const totalOwing = useMemo(
     () =>
       owingGroups.reduce(
-        (sum: number, g: GroupItem) => sum + Math.abs(g.currentUserNetBalance || 0),
+        (sum: number, g: GroupItem) => sum + Math.abs(getGroupNetBalance(g)),
         0
       ),
     [owingGroups]
@@ -102,7 +108,7 @@ export default function BalancesTabScreen() {
                   </View>
                 </View>
                 <Text style={[styles.itemAmount, { color: Color.positive }]}>
-                  +₹{(g.currentUserNetBalance || 0).toFixed(2)}
+                  +₹{getGroupNetBalance(g).toFixed(2)}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -134,7 +140,7 @@ export default function BalancesTabScreen() {
                   </View>
                 </View>
                 <Text style={[styles.itemAmount, { color: Color.negative }]}>
-                  -₹{Math.abs(g.currentUserNetBalance || 0).toFixed(2)}
+                  -₹{Math.abs(getGroupNetBalance(g)).toFixed(2)}
                 </Text>
               </TouchableOpacity>
             ))}

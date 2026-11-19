@@ -1,27 +1,21 @@
 import { Color } from '@/src/constants/color';
 import { useAuth } from '@/src/context/AuthContext';
 import {
-  useDeleteGroup,
   useGroupBalances,
   useGroupDetails,
-  useGroupExpenses,
   useGroupMembers,
-  useInviteMember,
-  useRemoveMember,
+  useInfiniteGroupExpenses,
 } from '@/src/hooks/useSplitwise';
-import { GroupMember, SharedExpense, SuggestedTransfer } from '@/src/types/splitwise';
+import { SharedExpense } from '@/src/types/splitwise';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useCallback, useMemo } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
-  Modal,
   RefreshControl,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -31,63 +25,95 @@ export default function GroupDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const { user } = useAuth();
+  const currentUserId = user?.id || 'usr_me';
 
-  const [activeTab, setActiveTab] = useState<'expenses' | 'balances' | 'members'>('expenses');
-  const [inviteModalVisible, setInviteModalVisible] = useState(false);
-  const [invitePhone, setInvitePhone] = useState('');
-
-  // Queries
-  const { data: group, isLoading: groupLoading, refetch: refetchGroup } = useGroupDetails(id);
+  // 1. Queries
   const {
-    data: expensesData,
-    isLoading: expensesLoading,
-    refetch: refetchExpenses,
-    isRefetching: isExpensesRefetching,
-  } = useGroupExpenses(id);
+    data: group,
+    isLoading: groupLoading,
+    refetch: refetchGroup,
+  } = useGroupDetails(id);
+
   const {
     data: balancesData,
     isLoading: balancesLoading,
     refetch: refetchBalances,
   } = useGroupBalances(id);
+
   const {
     data: membersData,
-    isLoading: membersLoading,
     refetch: refetchMembers,
   } = useGroupMembers(id);
 
-  // Mutations
-  const inviteMemberMutation = useInviteMember(id || '');
-  const removeMemberMutation = useRemoveMember(id || '');
-  const deleteGroupMutation = useDeleteGroup();
+  const {
+    data: expensesData,
+    isLoading: expensesLoading,
+    isRefetching: isExpensesRefetching,
+    refetch: refetchExpenses,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteGroupExpenses(id, 20);
 
-  const expenses = expensesData?.content || [];
+  // Flatten all paginated expense pages
+  const allExpenses: SharedExpense[] = useMemo(() => {
+    if (!expensesData?.pages) return [];
+    return expensesData.pages.flatMap((page) => page.content || []);
+  }, [expensesData]);
+
   const members = membersData || group?.members || [];
   const suggestedTransfers = balancesData?.suggestedTransfers || [];
   const memberBalances = balancesData?.memberBalances || [];
 
-  const handleInvite = async () => {
-    const cleanPhone = invitePhone.replace(/[^0-9]/g, '');
-    if (cleanPhone.length < 10) {
-      Alert.alert('Invalid Phone', 'Please enter a valid 10-digit phone number.');
-      return;
+  // 2. Net Overall Balance calculation strictly for current logged in user in this group
+  const overallNetBalance = useMemo(() => {
+    // Priority A: Check memberBalances for exact user position
+    const myBalanceEntry = memberBalances.find(
+      (m) => m.userId === currentUserId || (currentUserId === 'usr_me' && m.userId?.includes('me'))
+    );
+    if (myBalanceEntry && typeof myBalanceEntry.netBalance === 'number') {
+      return myBalanceEntry.netBalance;
     }
-    const fullPhone = `+91${cleanPhone.slice(-10)}`;
 
-    try {
-      await inviteMemberMutation.mutateAsync(fullPhone);
-      setInvitePhone('');
-      setInviteModalVisible(false);
-      Alert.alert('Invitation Sent', `Invitation has been sent to ${fullPhone}`);
-    } catch (err: any) {
-      Alert.alert(
-        'Invite Notice',
-        err.response?.data?.message || err.message || 'Invitation sent successfully.'
-      );
-      setInviteModalVisible(false);
-    }
-  };
+    // Priority B: Check backend group metadata (`myNetBalance` or `currentUserNetBalance`)
+    if (typeof group?.myNetBalance === 'number') return group.myNetBalance;
+    if (typeof group?.currentUserNetBalance === 'number') return group.currentUserNetBalance;
 
-  const safeGoBack = () => {
+    // Priority C: Calculate from suggested transfers involving current user
+    let net = 0;
+    suggestedTransfers.forEach((t) => {
+      const isToMe = t.toUserId === currentUserId || (currentUserId === 'usr_me' && t.toUserId?.includes('me'));
+      const isFromMe = t.fromUserId === currentUserId || (currentUserId === 'usr_me' && t.fromUserId?.includes('me'));
+      if (isToMe) net += t.amount;
+      if (isFromMe) net -= t.amount;
+    });
+    return net;
+  }, [memberBalances, group, suggestedTransfers, currentUserId]);
+
+  // 3. User-to-User Balances (Filter only transfers where current user is involved)
+  const myRelevantTransfers = useMemo(() => {
+    return suggestedTransfers.filter((t) => {
+      const isToMe = t.toUserId === currentUserId || (currentUserId === 'usr_me' && t.toUserId?.includes('me'));
+      const isFromMe = t.fromUserId === currentUserId || (currentUserId === 'usr_me' && t.fromUserId?.includes('me'));
+      return isToMe || isFromMe;
+    });
+  }, [suggestedTransfers, currentUserId]);
+
+  // First 2 relevant transfers for default preview
+  const previewTransfers = useMemo(() => {
+    return myRelevantTransfers.slice(0, 2);
+  }, [myRelevantTransfers]);
+
+  // Pull to refresh handler
+  const handleRefresh = useCallback(() => {
+    refetchGroup();
+    refetchBalances();
+    refetchMembers();
+    refetchExpenses();
+  }, [refetchGroup, refetchBalances, refetchMembers, refetchExpenses]);
+
+  // Safe back navigation
+  const handleBack = () => {
     if (router.canGoBack()) {
       router.back();
     } else {
@@ -95,427 +121,326 @@ export default function GroupDetailScreen() {
     }
   };
 
-  const handleDeleteGroup = () => {
-    Alert.alert(
-      'Archive Group',
-      'Are you sure you want to delete or archive this group?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Archive',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              if (id) {
-                await deleteGroupMutation.mutateAsync(id);
-                safeGoBack();
-              }
-            } catch (err: any) {
-              Alert.alert('Notice', err.response?.data?.message || 'Group archived.');
-              safeGoBack();
-            }
-          },
-        },
-      ]
-    );
+  const getInitials = (name?: string) => {
+    if (!name) return '?';
+    const parts = name.trim().split(/\s+/);
+    if (parts.length >= 2) {
+      return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase();
   };
 
-  const handleLeaveOrRemoveMember = (member: GroupMember) => {
-    const isSelf = member.userId === user?.id;
-    const title = isSelf ? 'Leave Group' : 'Remove Member';
-    const message = isSelf
-      ? 'Are you sure you want to leave this group?'
-      : `Remove ${member.name} from the group?`;
+  // Render individual expense row
+  const renderExpenseRow = useCallback(
+    ({ item }: { item: SharedExpense }) => {
+      const isMePayer =
+        item.paidBy?.id === currentUserId ||
+        (item as any).paidByUserId === currentUserId ||
+        (currentUserId === 'usr_me' && item.paidBy?.id?.includes('me'));
 
-    Alert.alert(title, message, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: isSelf ? 'Leave' : 'Remove',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await removeMemberMutation.mutateAsync(member.userId);
-            if (isSelf) {
-              safeGoBack();
-            } else {
-              Alert.alert('Success', 'Member removed successfully.');
-            }
-          } catch (err: any) {
-            Alert.alert(
-              'Notice',
-              err.response?.data?.message || 'Unsettled balance must be cleared before leaving.'
-            );
-          }
-        },
-      },
-    ]);
-  };
+      const payerName = isMePayer ? 'You' : item.paidBy?.name || 'Someone';
 
-  const renderExpenseItem = ({ item }: { item: SharedExpense }) => (
-    <TouchableOpacity
-      style={styles.expenseCard}
-      activeOpacity={0.7}
-      onPress={() =>
-        router.push({
-          pathname: '/ExpenseDetail',
-          params: { id: item.id, groupId: id },
-        })
+      // Find user's exact share
+      let userShare = 0;
+      if (item.splits && item.splits.length > 0) {
+        const mySplit = item.splits.find(
+          (s) => s.userId === currentUserId || (currentUserId === 'usr_me' && s.userId?.includes('me'))
+        );
+        if (mySplit) {
+          userShare = mySplit.shareAmount;
+        } else if (isMePayer) {
+          userShare = 0;
+        }
+      } else {
+        const count = item.participantCount || 1;
+        userShare = item.amount / count;
       }
-    >
-      <View style={styles.expenseIconBadge}>
-        <Ionicons name="receipt-outline" size={20} color={Color.primary} />
-      </View>
 
-      <View style={styles.expenseInfo}>
-        <Text style={styles.expenseTitle} numberOfLines={1}>
-          {item.title}
-        </Text>
-        <Text style={styles.expenseSub}>
-          {item.paidBy?.name || 'Someone'} paid • {new Date(item.createdAt).toLocaleDateString()}
-        </Text>
-      </View>
+      const formattedDate = new Date(item.createdAt).toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+      });
 
-      <View style={styles.expenseRight}>
-        <Text style={styles.expenseTotal}>₹{item.amount.toFixed(2)}</Text>
-        <Text style={styles.expenseSplits}>
-          {item.participantCount || 1} people
-        </Text>
-      </View>
-    </TouchableOpacity>
+      return (
+        <TouchableOpacity
+          style={styles.expenseRow}
+          activeOpacity={0.7}
+          onPress={() =>
+            router.push({
+              pathname: '/ExpenseDetail' as any,
+              params: { id: item.id, groupId: id },
+            })
+          }
+        >
+          {/* Calendar / Date Tile */}
+          <View style={styles.dateTile}>
+            <Ionicons name="receipt-outline" size={20} color={Color.primary} />
+          </View>
+
+          {/* Expense Title & Payer Details */}
+          <View style={styles.expenseInfo}>
+            <Text style={styles.expenseTitle} numberOfLines={1}>
+              {item.title}
+            </Text>
+            <Text style={styles.expenseSub} numberOfLines={1}>
+              {payerName} paid ₹{item.amount.toFixed(2)} • {formattedDate}
+            </Text>
+          </View>
+
+          {/* User's Share Breakdown */}
+          <View style={styles.expenseRight}>
+            <Text style={styles.expenseShareLabel}>Your share</Text>
+            <Text
+              style={[
+                styles.expenseShareAmount,
+                userShare > 0 ? { color: Color.text } : { color: Color.textMuted },
+              ]}
+            >
+              ₹{userShare.toFixed(2)}
+            </Text>
+          </View>
+        </TouchableOpacity>
+      );
+    },
+    [currentUserId, id, router]
   );
 
-  return (
-    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity
-          style={styles.iconCircle}
-          onPress={safeGoBack}
-          activeOpacity={0.7}
-        >
-          <Ionicons name="arrow-back" size={22} color={Color.text} />
-        </TouchableOpacity>
+  // Render header component of the single FlatList
+  const renderListHeader = () => {
+    const isPositive = overallNetBalance > 0.01;
+    const isNegative = overallNetBalance < -0.01;
 
-        <View style={styles.headerTitleContainer}>
-          <Text style={styles.headerTitle} numberOfLines={1}>
+    const memberCount = group?.memberCount || members.length || 1;
+
+    return (
+      <View style={styles.headerContentContainer}>
+        {/* Section 1: Group Information */}
+        <View style={styles.groupInfoBox}>
+          <Text style={styles.groupNameText} numberOfLines={2}>
             {group?.name || 'Group Details'}
           </Text>
-          <Text style={styles.headerDesc} numberOfLines={1}>
-            {group?.description || `${members.length} members`}
+          <Text style={styles.memberCountText}>
+            {memberCount} {memberCount === 1 ? 'member' : 'members'}
           </Text>
         </View>
 
-        <TouchableOpacity
-          style={styles.iconCircle}
-          onPress={handleDeleteGroup}
-          activeOpacity={0.7}
-        >
-          <Ionicons name="ellipsis-vertical" size={20} color={Color.text} />
-        </TouchableOpacity>
-      </View>
-
-      {/* Group Net Stats Banner */}
-      <View style={styles.statsBanner}>
-        <View style={styles.statBox}>
-          <Text style={styles.statLabel}>Total Expenses</Text>
-          <Text style={styles.statValue}>₹{group?.totalExpenses || 0}</Text>
-        </View>
-        <View style={styles.statDivider} />
-        <View style={styles.statBox}>
-          <Text style={styles.statLabel}>Your Net Balance</Text>
-          <Text
-            style={[
-              styles.statValue,
-              (group?.currentUserNetBalance || 0) > 0
-                ? { color: Color.positive }
-                : (group?.currentUserNetBalance || 0) < 0
-                ? { color: Color.negative }
-                : { color: Color.settled },
-            ]}
-          >
-            {(group?.currentUserNetBalance || 0) > 0 ? '+' : ''}₹
-            {(group?.currentUserNetBalance || 0).toFixed(2)}
-          </Text>
-        </View>
-      </View>
-
-      {/* Tabs */}
-      <View style={styles.tabBar}>
-        <TouchableOpacity
-          style={[styles.tabItem, activeTab === 'expenses' && styles.tabItemActive]}
-          onPress={() => setActiveTab('expenses')}
-        >
-          <Text
-            style={[styles.tabText, activeTab === 'expenses' && styles.tabTextActive]}
-          >
-            Expenses ({expenses.length})
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.tabItem, activeTab === 'balances' && styles.tabItemActive]}
-          onPress={() => {
-            setActiveTab('balances');
-            refetchBalances();
-          }}
-        >
-          <Text
-            style={[styles.tabText, activeTab === 'balances' && styles.tabTextActive]}
-          >
-            Balances & Debt
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.tabItem, activeTab === 'members' && styles.tabItemActive]}
-          onPress={() => {
-            setActiveTab('members');
-            refetchMembers();
-          }}
-        >
-          <Text
-            style={[styles.tabText, activeTab === 'members' && styles.tabTextActive]}
-          >
-            Members ({members.length})
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Tab 1: Expenses */}
-      {activeTab === 'expenses' && (
-        <View style={{ flex: 1 }}>
-          {expensesLoading ? (
-            <View style={styles.centerContainer}>
-              <ActivityIndicator color={Color.primary} />
+        {/* Section 2: Overall Group Balance */}
+        <View style={styles.balanceStatusBox}>
+          {balancesLoading || groupLoading ? (
+            <ActivityIndicator size="small" color={Color.primary} />
+          ) : isPositive ? (
+            <View style={styles.balanceBadgePositive}>
+              <Ionicons name="arrow-down-circle" size={18} color={Color.positive} />
+              <Text style={styles.balanceTextPositive}>
+                You are owed ₹{overallNetBalance.toFixed(2)}
+              </Text>
             </View>
-          ) : expenses.length === 0 ? (
-            <View style={styles.emptyTab}>
-              <Ionicons name="receipt-outline" size={48} color={Color.textMuted} />
-              <Text style={styles.emptyTabText}>No expenses added yet</Text>
-              <Text style={styles.emptyTabSub}>
-                Add shared expenses like food, fuel, or rent to track who paid.
+          ) : isNegative ? (
+            <View style={styles.balanceBadgeNegative}>
+              <Ionicons name="arrow-up-circle" size={18} color={Color.negative} />
+              <Text style={styles.balanceTextNegative}>
+                You owe ₹{Math.abs(overallNetBalance).toFixed(2)}
               </Text>
             </View>
           ) : (
-            <FlatList
-              data={expenses}
-              keyExtractor={(item) => item.id}
-              renderItem={renderExpenseItem}
-              contentContainerStyle={styles.listPadding}
-              refreshControl={
-                <RefreshControl
-                  refreshing={isExpensesRefetching}
-                  onRefresh={() => {
-                    refetchGroup();
-                    refetchExpenses();
-                  }}
-                  tintColor={Color.primary}
-                />
-              }
-            />
-          )}
-        </View>
-      )}
-
-      {/* Tab 2: Balances & Debt Simplification */}
-      {activeTab === 'balances' && (
-        <View style={{ flex: 1, paddingHorizontal: 20 }}>
-          {balancesLoading ? (
-            <View style={styles.centerContainer}>
-              <ActivityIndicator color={Color.primary} />
+            <View style={styles.balanceBadgeSettled}>
+              <Ionicons name="checkmark-circle-outline" size={18} color={Color.settled} /> 
+              <Text style={styles.balanceTextSettled}>You are all settled up</Text>
             </View>
-          ) : (
-            <FlatList
-              data={suggestedTransfers}
-              keyExtractor={(item, index) => `${item.fromUserId}-${item.toUserId}-${index}`}
-              ListHeaderComponent={
-                <View style={{ marginBottom: 16 }}>
-                  <Text style={styles.sectionHeader}>Member Balances</Text>
-                  {memberBalances.map((mb) => (
-                    <View key={mb.userId} style={styles.memberBalanceRow}>
-                      <View>
-                        <Text style={styles.mbName}>{mb.name}</Text>
-                        <Text style={styles.mbSub}>
-                          Paid: ₹{mb.totalPaid} • Share: ₹{mb.totalShare}
-                        </Text>
-                      </View>
-                      <Text
-                        style={[
-                          styles.mbNet,
-                          mb.netBalance > 0
-                            ? { color: Color.positive }
-                            : mb.netBalance < 0
-                            ? { color: Color.negative }
-                            : { color: Color.settled },
-                        ]}
-                      >
-                        {mb.netBalance > 0
-                          ? `gets ₹${mb.netBalance.toFixed(2)}`
-                          : mb.netBalance < 0
-                          ? `owes ₹${Math.abs(mb.netBalance).toFixed(2)}`
-                          : 'settled'}
-                      </Text>
-                    </View>
-                  ))}
-
-                  <Text style={[styles.sectionHeader, { marginTop: 20 }]}>
-                    Who Owes Whom (Suggested Transfers)
-                  </Text>
-                  {suggestedTransfers.length === 0 && (
-                    <Text style={styles.emptySubtle}>
-                      Everyone in this group is fully settled up! 🎉
-                    </Text>
-                  )}
-                </View>
-              }
-              renderItem={({ item }: { item: SuggestedTransfer }) => (
-                <View style={styles.transferCard}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.transferText}>
-                      <Text style={{ fontWeight: '700' }}>{item.fromUserName}</Text> owes{' '}
-                      <Text style={{ fontWeight: '700' }}>{item.toUserName}</Text>
-                    </Text>
-                    <Text style={styles.transferAmount}>₹{item.amount.toFixed(2)}</Text>
-                  </View>
-
-                  <TouchableOpacity
-                    style={styles.settleButton}
-                    onPress={() =>
-                      router.push({
-                        pathname: '/SettleUp' as any,
-                        params: {
-                          groupId: id,
-                          fromUserId: item.fromUserId,
-                          fromUserName: item.fromUserName,
-                          toUserId: item.toUserId,
-                          toUserName: item.toUserName,
-                          amount: item.amount.toString(),
-                        },
-                      })
-                    }
-                  >
-                    <Text style={styles.settleButtonText}>Settle Up</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-              contentContainerStyle={{ paddingBottom: 90 }}
-            />
           )}
         </View>
-      )}
 
-      {/* Tab 3: Members */}
-      {activeTab === 'members' && (
-        <View style={{ flex: 1, paddingHorizontal: 20 }}>
-          <View style={styles.membersTopAction}>
-            <Text style={styles.sectionHeader}>Group Members ({members.length})</Text>
-            <TouchableOpacity
-              style={styles.inviteMemberBtn}
-              onPress={() => setInviteModalVisible(true)}
-            >
-              <Ionicons name="person-add" size={16} color={Color.white} />
-              <Text style={styles.inviteMemberBtnText}>Invite</Text>
-            </TouchableOpacity>
+        {/* Section 3: Group Members Balance Preview */}
+        <View style={styles.balancesSection}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>Balances</Text>
           </View>
 
-          {membersLoading ? (
-            <View style={styles.centerContainer}>
-              <ActivityIndicator color={Color.primary} />
+          {previewTransfers.length === 0 ? (
+            <View style={styles.settledPreviewCard}>
+              <Ionicons name="checkmark-done" size={24} color={Color.positive} />
+              <Text style={styles.settledPreviewText}>
+                No outstanding balances for you in this group.
+              </Text>
             </View>
           ) : (
-            <FlatList
-              data={members}
-              keyExtractor={(item) => item.id || item.userId}
-              renderItem={({ item }) => (
-                <View style={styles.memberCard}>
-                  <View style={styles.memberAvatar}>
-                    <Ionicons name="person" size={20} color={Color.primary} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.memberName}>
-                      {item.name} {item.userId === user?.id ? '(You)' : ''}
-                    </Text>
-                    <Text style={styles.memberRole}>
-                      {item.role || 'Member'} • {item.phoneNumber || 'Joined'}
-                    </Text>
-                  </View>
-                  <TouchableOpacity
-                    onPress={() => handleLeaveOrRemoveMember(item)}
-                    style={styles.memberActionBtn}
-                  >
-                    <Ionicons
-                      name={item.userId === user?.id ? 'log-out-outline' : 'trash-outline'}
-                      size={18}
-                      color={Color.negative}
-                    />
-                  </TouchableOpacity>
-                </View>
-              )}
-              contentContainerStyle={{ paddingBottom: 90 }}
-            />
-          )}
-        </View>
-      )}
+            <View style={styles.previewContainer}>
+              {previewTransfers.map((item, index) => {
+                const isToMe =
+                  item.toUserId === currentUserId ||
+                  (currentUserId === 'usr_me' && item.toUserId?.includes('me'));
+                const isFromMe =
+                  item.fromUserId === currentUserId ||
+                  (currentUserId === 'usr_me' && item.fromUserId?.includes('me'));
 
-      {/* Floating Add Expense Button */}
+                let displayName = '';
+                let relationLabel = '';
+                let isGreen = false;
+                let isRed = false;
+
+                if (isToMe) {
+                  displayName = item.fromUserName || 'Member';
+                  relationLabel = 'Owes you';
+                  isGreen = true;
+                } else if (isFromMe) {
+                  displayName = item.toUserName || 'Member';
+                  relationLabel = 'You owe';
+                  isRed = true;
+                } else {
+                  displayName = item.fromUserName;
+                  relationLabel = `Owes ${item.toUserName}`;
+                }
+
+                return (
+                  <View key={`${item.fromUserId}-${item.toUserId}-${index}`} style={styles.previewRow}>
+                    <View style={styles.memberAvatar}>
+                      <Text style={styles.memberAvatarText}>
+                        {getInitials(displayName)}
+                      </Text>
+                    </View>
+
+                    <View style={styles.previewMemberInfo}>
+                      <Text style={styles.previewMemberName} numberOfLines={1}>
+                        {displayName}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.previewRelationText,
+                          isGreen && { color: Color.positive },
+                          isRed && { color: Color.negative },
+                        ]}
+                      >
+                        {relationLabel}
+                      </Text>
+                    </View>
+
+                    <Text
+                      style={[
+                        styles.previewAmount,
+                        isGreen && { color: Color.positive },
+                        isRed && { color: Color.negative },
+                      ]}
+                    >
+                      {isGreen ? '+' : isRed ? '-' : ''}₹{item.amount.toFixed(2)}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+
+          {/* View All Balances Option */}
+          <TouchableOpacity
+            style={styles.viewAllBtn}
+            activeOpacity={0.7}
+            onPress={() =>
+              router.push({
+                pathname: '/GroupBalancesScreen' as any,
+                params: { groupId: id },
+              })
+            }
+          >
+            <Text style={styles.viewAllText}>View all balances</Text>
+            <Ionicons name="arrow-forward" size={16} color={Color.primary} />
+          </TouchableOpacity>
+        </View>
+
+        {/* Section 4: Expenses Header */}
+        <View style={styles.expensesHeaderRow}>
+          <Text style={styles.sectionTitle}>Expenses</Text>
+          <Text style={styles.expensesCountText}>
+            {allExpenses.length} {allExpenses.length === 1 ? 'expense' : 'expenses'}
+          </Text>
+        </View>
+      </View>
+    );
+  };
+
+  const renderListEmpty = () => {
+    if (expensesLoading) {
+      return (
+        <View style={styles.centerLoading}>
+          <ActivityIndicator size="large" color={Color.primary} />
+          <Text style={styles.emptySubtitle}>Loading group expenses...</Text>
+        </View>
+      );
+    }
+    return (
+      <View style={styles.emptyContainer}>
+        <View style={styles.emptyIconCircle}>
+          <Ionicons name="receipt-outline" size={40} color={Color.textMuted} />
+        </View>
+        <Text style={styles.emptyTitle}>No expenses yet</Text>
+        <Text style={styles.emptySubtitle}>
+          Add expenses below to split costs with group members.
+        </Text>
+      </View>
+    );
+  };
+
+  const renderListFooter = () => {
+    if (!isFetchingNextPage) return <View style={{ height: 100 }} />;
+    return (
+      <View style={styles.paginationFooter}>
+        <ActivityIndicator size="small" color={Color.primary} />
+        <Text style={styles.paginationText}>Loading more expenses...</Text>
+      </View>
+    );
+  };
+
+  return (
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      {/* Top Header: ONLY Back Arrow at Top-Left */}
+      <View style={styles.topHeader}>
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={handleBack}
+          activeOpacity={0.7}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
+          <Ionicons name="arrow-back" size={24} color={Color.text} />
+        </TouchableOpacity>
+      </View>
+
+      {/* Main Single Scrollable FlatList */}
+      <FlatList
+        data={allExpenses}
+        keyExtractor={(item) => item.id}
+        renderItem={renderExpenseRow}
+        ListHeaderComponent={renderListHeader}
+        ListEmptyComponent={renderListEmpty}
+        ListFooterComponent={renderListFooter}
+        contentContainerStyle={styles.flatListContent}
+        showsVerticalScrollIndicator={false}
+        onEndReached={() => {
+          if (hasNextPage && !isFetchingNextPage) {
+            fetchNextPage();
+          }
+        }}
+        onEndReachedThreshold={0.4}
+        refreshControl={
+          <RefreshControl
+            refreshing={isExpensesRefetching}
+            onRefresh={handleRefresh}
+            tintColor={Color.primary}
+          />
+        }
+      />
+
+      {/* Floating Action Button (Add Expense) */}
       <TouchableOpacity
         style={styles.fab}
         activeOpacity={0.85}
         onPress={() =>
           router.push({
-            pathname: '/AddExpense',
+            pathname: '/AddExpense' as any,
             params: { groupId: id },
           })
         }
       >
-        <Ionicons name="receipt" size={22} color={Color.white} />
+        <Ionicons name="receipt" size={20} color={Color.white} />
         <Text style={styles.fabText}>Add Expense</Text>
       </TouchableOpacity>
-
-      {/* Invite Member Modal */}
-      <Modal
-        visible={inviteModalVisible}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setInviteModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Invite to {group?.name}</Text>
-              <TouchableOpacity onPress={() => setInviteModalVisible(false)}>
-                <Ionicons name="close" size={24} color={Color.textSecondary} />
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.fieldLabel}>Friend's Mobile Number</Text>
-            <View style={styles.modalPhoneRow}>
-              <Text style={styles.modalPhoneCode}>+91</Text>
-              <TextInput
-                style={styles.modalPhoneInput}
-                placeholder="98765 43210"
-                placeholderTextColor={Color.textMuted}
-                keyboardType="phone-pad"
-                maxLength={10}
-                value={invitePhone}
-                onChangeText={setInvitePhone}
-              />
-            </View>
-
-            <TouchableOpacity
-              style={styles.modalSubmitBtn}
-              onPress={handleInvite}
-              disabled={inviteMemberMutation.isPending}
-            >
-              {inviteMemberMutation.isPending ? (
-                <ActivityIndicator color={Color.white} />
-              ) : (
-                <Text style={styles.modalSubmitBtnText}>Send Invitation</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
@@ -525,110 +450,207 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: Color.background,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    gap: 12,
+  topHeader: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: Color.background,
   },
-  iconCircle: {
+  backButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: Color.white,
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: Color.border,
   },
-  headerTitleContainer: {
-    flex: 1,
+  flatListContent: {
+    paddingHorizontal: 16,
+    paddingBottom: 24,
   },
-  headerTitle: {
-    fontSize: 20,
+  headerContentContainer: {
+    paddingBottom: 8,
+  },
+  groupInfoBox: {
+    marginTop: 4,
+    marginBottom: 12,
+  },
+  groupNameText: {
+    fontSize: 26,
     fontWeight: '800',
     color: Color.text,
+    letterSpacing: -0.5,
   },
-  headerDesc: {
-    fontSize: 12,
+  memberCountText: {
+    fontSize: 14,
     color: Color.textSecondary,
-    marginTop: 2,
+    fontWeight: '500',
+    marginTop: 4,
   },
-  statsBanner: {
+  balanceStatusBox: {
+    marginBottom: 20,
+  },
+  balanceBadgePositive: {
     flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    alignSelf: 'flex-start',
+    backgroundColor: Color.positiveBg,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+  },
+  balanceTextPositive: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: Color.positive,
+  },
+  balanceBadgeNegative: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    alignSelf: 'flex-start',
+    backgroundColor: Color.negativeBg,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+  },
+  balanceTextNegative: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: Color.negative,
+  },
+  balanceBadgeSettled: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    alignSelf: 'flex-start',
+    backgroundColor: Color.settledBg,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+  },
+  balanceTextSettled: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: Color.settled,
+  },
+  balancesSection: {
     backgroundColor: Color.white,
-    marginHorizontal: 20,
     borderRadius: 16,
     padding: 16,
     borderWidth: 1,
     borderColor: Color.borderLight,
-    marginBottom: 16,
+    marginBottom: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 2,
   },
-  statBox: {
-    flex: 1,
-    alignItems: 'center',
+  sectionHeaderRow: {
+    marginBottom: 12,
   },
-  statDivider: {
-    width: 1,
-    backgroundColor: Color.border,
-  },
-  statLabel: {
-    fontSize: 12,
-    color: Color.textSecondary,
-    marginBottom: 4,
-    fontWeight: '500',
-  },
-  statValue: {
+  sectionTitle: {
     fontSize: 18,
     fontWeight: '800',
     color: Color.text,
   },
-  tabBar: {
+  previewContainer: {
+    gap: 12,
+    marginBottom: 14,
+  },
+  previewRow: {
     flexDirection: 'row',
-    backgroundColor: Color.white,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: Color.border,
-    marginBottom: 12,
-  },
-  tabItem: {
-    flex: 1,
-    paddingVertical: 12,
     alignItems: 'center',
-    borderBottomWidth: 2.5,
-    borderBottomColor: 'transparent',
   },
-  tabItemActive: {
-    borderBottomColor: Color.primary,
+  memberAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: Color.primaryLight,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
   },
-  tabText: {
+  memberAvatarText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: Color.primary,
+  },
+  previewMemberInfo: {
+    flex: 1,
+  },
+  previewMemberName: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: Color.text,
+  },
+  previewRelationText: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginTop: 1,
+  },
+  previewAmount: {
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  settledPreviewCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+    marginBottom: 10,
+  },
+  settledPreviewText: {
+    flex: 1,
     fontSize: 13,
     color: Color.textSecondary,
-    fontWeight: '600',
+    fontWeight: '500',
   },
-  tabTextActive: {
-    color: Color.primary,
+  viewAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: Color.borderLight,
+  },
+  viewAllText: {
+    fontSize: 14,
     fontWeight: '700',
+    color: Color.primary,
   },
-  listPadding: {
-    paddingHorizontal: 20,
-    paddingBottom: 90,
+  expensesHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+    marginTop: 4,
   },
-  expenseCard: {
+  expensesCountText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Color.textSecondary,
+  },
+  expenseRow: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: Color.white,
-    borderRadius: 14,
     padding: 14,
+    borderRadius: 14,
     marginBottom: 10,
     borderWidth: 1,
     borderColor: Color.borderLight,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
+    elevation: 1,
   },
-  expenseIconBadge: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+  dateTile: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     backgroundColor: Color.primaryLight,
     justifyContent: 'center',
     alignItems: 'center',
@@ -636,176 +658,71 @@ const styles = StyleSheet.create({
   },
   expenseInfo: {
     flex: 1,
+    marginRight: 12,
   },
   expenseTitle: {
     fontSize: 15,
     fontWeight: '700',
     color: Color.text,
+    marginBottom: 3,
   },
   expenseSub: {
     fontSize: 12,
     color: Color.textSecondary,
-    marginTop: 2,
   },
   expenseRight: {
     alignItems: 'flex-end',
   },
-  expenseTotal: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: Color.text,
+  expenseShareLabel: {
+    fontSize: 10,
+    color: Color.textSecondary,
+    fontWeight: '500',
+    marginBottom: 2,
   },
-  expenseSplits: {
-    fontSize: 11,
-    color: Color.textMuted,
-    marginTop: 2,
+  expenseShareAmount: {
+    fontSize: 14,
+    fontWeight: '700',
   },
-  centerContainer: {
-    flex: 1,
-    justifyContent: 'center',
+  emptyContainer: {
     alignItems: 'center',
     paddingVertical: 40,
+    paddingHorizontal: 20,
   },
-  emptyTab: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 50,
-    paddingHorizontal: 30,
-  },
-  emptyTabText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: Color.text,
-    marginTop: 12,
-  },
-  emptyTabSub: {
-    fontSize: 13,
-    color: Color.textSecondary,
-    textAlign: 'center',
-    marginTop: 4,
-    lineHeight: 18,
-  },
-  sectionHeader: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: Color.textSecondary,
-    textTransform: 'uppercase',
-    marginBottom: 10,
-    letterSpacing: 0.5,
-  },
-  memberBalanceRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: Color.white,
-    padding: 12,
-    borderRadius: 12,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: Color.borderLight,
-  },
-  mbName: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: Color.text,
-  },
-  mbSub: {
-    fontSize: 11,
-    color: Color.textSecondary,
-    marginTop: 2,
-  },
-  mbNet: {
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  transferCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: Color.white,
-    padding: 14,
-    borderRadius: 14,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: Color.borderLight,
-  },
-  transferText: {
-    fontSize: 14,
-    color: Color.text,
-  },
-  transferAmount: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: Color.primary,
-    marginTop: 2,
-  },
-  settleButton: {
-    backgroundColor: Color.primary,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 10,
-  },
-  settleButtonText: {
-    color: Color.white,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  emptySubtle: {
-    fontSize: 13,
-    color: Color.textMuted,
-    fontStyle: 'italic',
-    paddingVertical: 8,
-  },
-  membersTopAction: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginVertical: 10,
-  },
-  inviteMemberBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: Color.primary,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  inviteMemberBtnText: {
-    color: Color.white,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  memberCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: Color.white,
-    padding: 12,
-    borderRadius: 12,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: Color.borderLight,
-  },
-  memberAvatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+  emptyIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     backgroundColor: Color.primaryLight,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 10,
+    marginBottom: 12,
   },
-  memberName: {
-    fontSize: 14,
+  emptyTitle: {
+    fontSize: 16,
     fontWeight: '700',
     color: Color.text,
+    marginBottom: 4,
   },
-  memberRole: {
-    fontSize: 11,
+  emptySubtitle: {
+    fontSize: 13,
     color: Color.textSecondary,
-    marginTop: 2,
+    textAlign: 'center',
   },
-  memberActionBtn: {
-    padding: 8,
+  centerLoading: {
+    paddingVertical: 40,
+    alignItems: 'center',
+    gap: 12,
+  },
+  paginationFooter: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 16,
+    gap: 8,
+  },
+  paginationText: {
+    fontSize: 12,
+    color: Color.textSecondary,
   },
   fab: {
     position: 'absolute',
@@ -816,79 +733,17 @@ const styles = StyleSheet.create({
     gap: 8,
     backgroundColor: Color.primary,
     paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingVertical: 13,
     borderRadius: 30,
     shadowColor: Color.primary,
-    shadowOffset: { width: 0, height: 6 },
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.35,
-    shadowRadius: 10,
+    shadowRadius: 8,
     elevation: 6,
   },
   fabText: {
     color: Color.white,
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalCard: {
-    backgroundColor: Color.white,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 24,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: Color.text,
-  },
-  fieldLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: Color.text,
-    marginBottom: 8,
-  },
-  modalPhoneRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: Color.border,
-    borderRadius: 12,
-    backgroundColor: Color.background,
-    marginBottom: 20,
-  },
-  modalPhoneCode: {
-    paddingHorizontal: 12,
-    fontSize: 15,
-    fontWeight: '700',
-    color: Color.text,
-  },
-  modalPhoneInput: {
-    flex: 1,
-    paddingVertical: 12,
-    paddingRight: 12,
-    fontSize: 15,
-    color: Color.text,
-    fontWeight: '600',
-  },
-  modalSubmitBtn: {
-    backgroundColor: Color.primary,
-    paddingVertical: 15,
-    borderRadius: 14,
-    alignItems: 'center',
-  },
-  modalSubmitBtnText: {
-    color: Color.white,
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
   },
 });

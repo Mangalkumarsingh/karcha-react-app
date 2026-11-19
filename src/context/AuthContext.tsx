@@ -2,17 +2,20 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { clearAccessToken, getAccessToken, initToken, setAccessToken } from '../api/client';
 import { splitwiseApi } from '../api/splitwiseService';
-import { UserProfile } from '../types/splitwise';
+import { AuthResponse, RequestEmailOtpResponse, User } from '../types/splitwise';
 
 interface AuthContextType {
-  user: UserProfile | null;
+  user: User | null;
   token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  login: (token: string, profile?: UserProfile) => Promise<void>;
+  login: (token: string, profile?: User) => Promise<void>;
   logout: () => Promise<void>;
-  updateUser: (profile: Partial<UserProfile>) => void;
+  updateUser: (profile: Partial<User>) => void;
   refreshProfile: () => Promise<void>;
+  requestEmailOtp: (email: string) => Promise<RequestEmailOtpResponse>;
+  verifyEmailOtp: (email: string, otp: string) => Promise<AuthResponse>;
+  loginWithGoogle: (googleToken: string) => Promise<AuthResponse>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -21,7 +24,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
   const [token, setTokenState] = useState<string | null>(null);
-  const [user, setUser] = useState<UserProfile | null>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   // Restore session on app launch
@@ -40,7 +43,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       } catch (e) {
         console.warn('Failed to restore auth token:', e);
       } finally {
-        // Immediately unblock splash screen for instant app launch!
         setIsLoading(false);
       }
 
@@ -63,7 +65,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     bootstrapAsync();
   }, []);
 
-  const login = async (newToken: string, profile?: UserProfile) => {
+  const login = async (newToken: string, profile?: User) => {
     setTokenState(newToken);
     await setAccessToken(newToken);
 
@@ -90,7 +92,47 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     await AsyncStorage.removeItem('userProfile');
   };
 
-  const updateUser = (profile: Partial<UserProfile>) => {
+  const requestEmailOtp = async (email: string): Promise<RequestEmailOtpResponse> => {
+    const trimmedEmail = email.trim().toLowerCase();
+    const response = await splitwiseApi.requestEmailOtp(trimmedEmail);
+    return response.data;
+  };
+
+  const verifyEmailOtp = async (email: string, otp: string): Promise<AuthResponse> => {
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedOtp = otp.trim();
+    const response = await splitwiseApi.verifyEmailOtp(trimmedEmail, trimmedOtp);
+    const data = response.data;
+
+    if (data?.accessToken) {
+      const resolvedUser: User = data.user || {
+        id: data.id || '',
+        name: data.name || (data.email ? data.email.split('@')[0] : 'Kharcha User'),
+        email: data.email ?? trimmedEmail,
+        phoneNumber: data.phoneNumber ?? null,
+      };
+      await login(data.accessToken, resolvedUser);
+    }
+    return data;
+  };
+
+  const loginWithGoogle = async (googleToken: string): Promise<AuthResponse> => {
+    const response = await splitwiseApi.googleLogin(googleToken);
+    const data = response.data;
+
+    if (data?.accessToken) {
+      const resolvedUser: User = data.user || {
+        id: data.id || '',
+        name: data.name || (data.email ? data.email.split('@')[0] : 'Google User'),
+        email: data.email ?? null,
+        phoneNumber: data.phoneNumber ?? null,
+      };
+      await login(data.accessToken, resolvedUser);
+    }
+    return data;
+  };
+
+  const updateUser = (profile: Partial<User>) => {
     setUser((prev) => {
       if (!prev) return null;
       const updated = { ...prev, ...profile };
@@ -122,6 +164,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         logout,
         updateUser,
         refreshProfile,
+        requestEmailOtp,
+        verifyEmailOtp,
+        loginWithGoogle,
       }}
     >
       {children}
